@@ -130,7 +130,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v6
       - id: matrix
-        run: echo "chips=$(uv run tasks.py chips --github-matrix)" >> "$GITHUB_OUTPUT"
+        run: echo "chips=$(uv run tasks.py check --github-matrix)" >> "$GITHUB_OUTPUT"
 
   # --------------------------------------------------------------------------
   # Build Packages
@@ -203,6 +203,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
 
       # Install the Rust toolchain for Xtensa devices:
       - uses: esp-rs/xtensa-toolchain@v1.6
@@ -216,15 +217,8 @@ jobs:
           toolchain: stable
           components: rust-src
 
-      - name: Build Xtensa docs
-        if: matrix.group == 'xtensa'
-        shell: bash
-        run: cargo xtask build documentation --chips esp32,esp32s2,esp32s3
-
-      - name: Build RISC-V docs
-        if: matrix.group == 'riscv'
-        shell: bash
-        run: cargo xtask build documentation --chips esp32c2,esp32c3,esp32c5,esp32c6,esp32c61,esp32h2,esp32p4,esp32s31
+      # Chip lists live in tasks.py (`docs_xtensa` / `docs_riscv`), not here.
+      - run: uv run tasks.py docs_${{ matrix.group }}
 
   # --------------------------------------------------------------------------
   # Doc tests — one matrix leg per chip, sourced from tasks.py
@@ -274,32 +268,37 @@ jobs:
           target: riscv32imc-unknown-none-elf,riscv32imac-unknown-none-elf,riscv32imafc-unknown-none-elf
           toolchain: stable
           components: rust-src
-      - run: uv run tasks.py check_${{ matrix.CHIP }}
+      - run: uv run tasks.py check --matrix CHIP=${{ matrix.CHIP }}
 
   # --------------------------------------------------------------------------
-  # MSRV / clippy — camas computes the per-package clippy matrix; one leg per
-  # chip, replacing the two hand-listed `lint-packages` invocations.
+  # MSRV / clippy — clippy is the one axis that couples to the toolchain, so it
+  # stays two groups (xtensa→esp, riscv→MSRV) rather than per-chip. camas owns
+  # the group definitions (`clippy_xtensa` / `clippy_riscv`); the chip lists live
+  # in tasks.py, not hand-repeated here.
   msrv:
-    needs: [calculate, discover]
+    needs: calculate
     if: needs.calculate.outputs.run-msrv == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.discover.outputs.chips) }}
+      matrix:
+        group:
+          - xtensa
+          - riscv
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v6
       - uses: esp-rs/xtensa-toolchain@v1.6
-        if: contains(fromJSON('["esp32","esp32s2","esp32s3"]'), matrix.CHIP)
+        if: matrix.group == 'xtensa'
         with:
           version: ${{ env.MSRV }}
       - uses: dtolnay/rust-toolchain@v1
-        if: ${{ !contains(fromJSON('["esp32","esp32s2","esp32s3"]'), matrix.CHIP) }}
+        if: matrix.group == 'riscv'
         with:
           target: riscv32imc-unknown-none-elf,riscv32imac-unknown-none-elf,riscv32imafc-unknown-none-elf,x86_64-unknown-linux-gnu
           toolchain: ${{ env.MSRV }}
           components: rust-src,clippy
-      - run: uv run tasks.py clippy_${{ matrix.CHIP }}
+      - run: uv run tasks.py clippy_${{ matrix.group }}
 
   # --------------------------------------------------------------------------
   # Xtensa LLD linking
