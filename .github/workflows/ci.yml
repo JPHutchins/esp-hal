@@ -119,6 +119,20 @@ jobs:
           echo "Decision: build=$BUILD docs=$DOCS msrv=$MSRV host=$HOST hil=$HIL changelog=$CHANGELOG semver=$SEMVER"
 
   # --------------------------------------------------------------------------
+  # Chip matrix (SSOT) — emitted once from tasks.py instead of being
+  # hand-unrolled per job. Consumed by check / clippy(msrv) / doc-tests.
+  discover:
+    needs: calculate
+    runs-on: ubuntu-latest
+    outputs:
+      chips: ${{ steps.matrix.outputs.chips }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+      - id: matrix
+        run: echo "chips=$(uv run tasks.py chips --github-matrix)" >> "$GITHUB_OUTPUT"
+
+  # --------------------------------------------------------------------------
   # Build Packages
   esp-hal:
     needs: calculate
@@ -170,9 +184,9 @@ jobs:
           CHIPS: ${{ join(matrix.group.chips, ' ') }}
           TOOLCHAIN: ${{ matrix.group.toolchain }}
         run: |
-          # lints and docs are checked separately
+          # lints, docs and crate checks are covered by the camas check/clippy jobs
           for chip in $CHIPS; do
-            cargo xcheck ci "$chip" --toolchain "$TOOLCHAIN" --no-lint --no-docs
+            cargo xcheck ci "$chip" --toolchain "$TOOLCHAIN" --no-lint --no-docs --no-check-crates
           done
 
   docs:
@@ -201,12 +215,6 @@ jobs:
           target: riscv32imc-unknown-none-elf,riscv32imac-unknown-none-elf,riscv32imafc-unknown-none-elf
           toolchain: stable
           components: rust-src
-      # Install the Rust nightly toolchain for RISC-V devices:
-      - uses: dtolnay/rust-toolchain@v1
-        with:
-          target: riscv32imc-unknown-none-elf,riscv32imac-unknown-none-elf,riscv32imafc-unknown-none-elf
-          toolchain: nightly
-          components: rust-src
 
       - name: Build Xtensa docs
         if: matrix.group == 'xtensa'
@@ -218,75 +226,80 @@ jobs:
         shell: bash
         run: cargo xtask build documentation --chips esp32c2,esp32c3,esp32c5,esp32c6,esp32c61,esp32h2,esp32p4,esp32s31
 
-      - name: Run Xtensa doc tests
-        if: matrix.group == 'xtensa'
-        shell: bash
-        run: |
-          cargo xtask run doc-tests esp32
-          cargo xtask run doc-tests esp32s2
-          cargo xtask run doc-tests esp32s3
-
-      - name: Run RISC-V doc tests
-        if: matrix.group == 'riscv'
-        shell: bash
-        run: |
-          cargo xtask run doc-tests esp32c2
-          cargo xtask run doc-tests esp32c3
-          cargo xtask run doc-tests esp32c5
-          cargo xtask run doc-tests esp32c6
-          cargo xtask run doc-tests esp32c61
-          cargo xtask run doc-tests esp32h2
-          cargo xtask run doc-tests esp32p4
-          cargo xtask run doc-tests esp32s31
-
   # --------------------------------------------------------------------------
-  # MSRV
-
-  msrv:
-    needs: calculate
-    if: needs.calculate.outputs.run-msrv == 'true'
+  # Doc tests — one matrix leg per chip, sourced from tasks.py
+  # (`camas chips --github-matrix`) instead of eleven hand-unrolled
+  # `cargo xtask run doc-tests <chip>` lines.
+  doc-tests:
+    needs: [calculate, discover]
+    if: needs.calculate.outputs.run-docs == 'true'
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
-      matrix:
-        group:
-          - xtensa
-          - riscv
-
+      matrix: ${{ fromJSON(needs.discover.outputs.chips) }}
     steps:
       - uses: actions/checkout@v6
-
+      - uses: astral-sh/setup-uv@v6
       - uses: esp-rs/xtensa-toolchain@v1.6
-        if: matrix.group == 'xtensa'
+        if: contains(fromJSON('["esp32","esp32s2","esp32s3"]'), matrix.CHIP)
+        with:
+          version: 1.95.0.0
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          target: riscv32imc-unknown-none-elf,riscv32imac-unknown-none-elf,riscv32imafc-unknown-none-elf
+          toolchain: nightly
+          components: rust-src
+      - run: uv run tasks.py doc_tests --matrix CHIP=${{ matrix.CHIP }}
+
+  # --------------------------------------------------------------------------
+  # Crate checks (cargo check) — computed by camas (tasks.py) from each
+  # package's metadata, one matrix leg per chip. Replaces the per-chip check
+  # that ran inside `xtask ci` (the build job now passes `--no-check-crates`).
+  check:
+    needs: [calculate, discover]
+    if: needs.calculate.outputs.run-build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.chips) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+      - uses: esp-rs/xtensa-toolchain@v1.6
+        if: contains(fromJSON('["esp32","esp32s2","esp32s3"]'), matrix.CHIP)
+        with:
+          version: 1.97.0.0
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          target: riscv32imc-unknown-none-elf,riscv32imac-unknown-none-elf,riscv32imafc-unknown-none-elf
+          toolchain: stable
+          components: rust-src
+      - run: uv run tasks.py check_${{ matrix.CHIP }}
+
+  # --------------------------------------------------------------------------
+  # MSRV / clippy — camas computes the per-package clippy matrix; one leg per
+  # chip, replacing the two hand-listed `lint-packages` invocations.
+  msrv:
+    needs: [calculate, discover]
+    if: needs.calculate.outputs.run-msrv == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.chips) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+      - uses: esp-rs/xtensa-toolchain@v1.6
+        if: contains(fromJSON('["esp32","esp32s2","esp32s3"]'), matrix.CHIP)
         with:
           version: ${{ env.MSRV }}
-
-      - name: esp toolchain checks
-        if: matrix.group == 'xtensa'
-        run: rustc +esp --version --verbose
-
       - uses: dtolnay/rust-toolchain@v1
-        if: matrix.group == 'riscv'
+        if: ${{ !contains(fromJSON('["esp32","esp32s2","esp32s3"]'), matrix.CHIP) }}
         with:
           target: riscv32imc-unknown-none-elf,riscv32imac-unknown-none-elf,riscv32imafc-unknown-none-elf,x86_64-unknown-linux-gnu
           toolchain: ${{ env.MSRV }}
           components: rust-src,clippy
-
-      - name: Stable toolchain checks
-        if: matrix.group == 'riscv'
-        run: rustc +${{ env.MSRV }} --version --verbose
-
-      # Verify the MSRV for all chips by running a lint session
-      - name: msrv RISC-V (esp-hal)
-        if: matrix.group == 'riscv'
-        run: |
-          cargo xtask lint-packages --chips esp32c2,esp32c3,esp32c5,esp32c6,esp32c61,esp32h2,esp32p4,esp32s31 --toolchain ${{ env.MSRV }}
-
-      - name: msrv Xtensa (esp-hal)
-        if: matrix.group == 'xtensa'
-        run: |
-          cargo xtask lint-packages --chips esp32,esp32s2,esp32s3 --toolchain esp
+      - run: uv run tasks.py clippy_${{ matrix.CHIP }}
 
   # --------------------------------------------------------------------------
   # Xtensa LLD linking
@@ -745,7 +758,9 @@ jobs:
     if: ${{ always() }}
     needs:
       - esp-hal
+      - check
       - docs
+      - doc-tests
       - msrv
       - host-tests
       - changelog
