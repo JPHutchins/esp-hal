@@ -32,6 +32,9 @@ api-baseline/
 
 .mcp.json
 .cursor/
+.claude/
+__pycache__/
+MIGRATION.md
 
 # Ignore compile tests
 compile-tests/
