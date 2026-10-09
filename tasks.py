@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["camas[mcp]>=0.1.27"]
+# dependencies = ["camas[mcp]>=0.1.30"]
 # ///
 """esp-hal tasks — the camas SSOT for local dev, CI, and agents.
 
